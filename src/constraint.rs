@@ -622,13 +622,16 @@ impl Constraint {
         if let Constraint::Bottom = self {
             return Some(Constraint::Bottom);
         }
+        if let Constraint::Bottom = other {
+            return Some(self.clone());
+        }
 
         // 此处还应该有其他逻辑来处理抽象约束
 
         // 对于原子值，我们认为当A > B时无简单表示，当B >= A时返回Bottom，当A与B没有任何superof关系时直接返回A
 
         // B >= A
-        if other.super_of(self) { 
+        if other.super_of(self) {
             return Some(Constraint::Bottom);
         }
         // A > B
@@ -656,19 +659,29 @@ impl Constraint {
             (a, Constraint::Union(elements)) => {
                 let mut new_a = a.clone();
                 let mut new_union = elements.as_ref().clone();
-                new_union.retain(|e| {
-                    match new_a.reduce_difference(e) {
-                        Some(diff) => {
-                            new_a = diff;
-                            false // 直接差集后不再需要这个元素
+                let mut modified = true;
+                while modified {
+                    modified = false;
+                    new_union.retain(|e| {
+                        match new_a.reduce_difference(e) {
+                            Some(diff) => {
+                                new_a = diff;
+                                modified = true; // 需要继续处理
+                                false // 直接差集后不再需要这个元素
+                            }
+                            None => true, // 保留这个元素
                         }
-                        None => true, // 保留这个元素
-                    }
-                });
-                Some(Constraint::Difference(
-                    Arc::new(new_a),
-                    Arc::new(Constraint::reduce_union(&new_union)),
-                ))
+                    });
+                }
+                if new_union.is_empty() {
+                    // 所有元素都被成功差集掉了
+                    Some(new_a)
+                } else {
+                    Some(Constraint::Difference(
+                        Arc::new(new_a),
+                        Arc::new(Constraint::reduce_union(&new_union)),
+                    ))
+                }
             }
             (a, Constraint::Difference(b, c)) => {
                 return Some(Self::reduce_union(&vec![
