@@ -147,25 +147,9 @@ fn main() {
         Constraint::LiteralInt(1),
         Constraint::LiteralFloat(1.5),
         Constraint::FloatBound(FloatBound::Inclusive(2.0), FloatBound::Inclusive(3.0)),
-        Constraint::LiteralBool(true),
         Constraint::LiteralString("hello".to_string()),
     ]);
     println!("Complex union = {:?}", complex_union);
-
-    // 布尔类型测试
-    let bool_union = Constraint::make_union(vec![
-        Constraint::LiteralBool(true),
-        Constraint::LiteralBool(false),
-    ]);
-    let bool_type = Constraint::Bool;
-    println!(
-        "Bool super_of Union[true, false] = {}",
-        bool_type.super_of(&bool_union)
-    );
-    println!(
-        "Bool union Union[true, false] = {:?}",
-        bool_type.union(&bool_union)
-    );
 
     // 嵌套 Pair 测试
     let nested_pair = Constraint::make_pair(
@@ -219,7 +203,6 @@ fn main() {
     let everything_union = Constraint::make_union(vec![
         Constraint::LiteralInt(1),
         Constraint::LiteralFloat(2.0),
-        Constraint::LiteralBool(true),
         Constraint::LiteralString("test".to_string()),
         Constraint::Bound(Bound::Inclusive(10), Bound::Inclusive(20)),
         Constraint::FloatBound(FloatBound::Inclusive(30.0), FloatBound::Inclusive(40.0)),

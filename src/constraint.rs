@@ -433,9 +433,8 @@ pub enum Constraint {
     // AtomicA intersection AtomicB = AtomicA.refine(AtomicB) union AtomicB.refine(AtomicA)
     LiteralInt(i64),             // 整数字面量约束
     LiteralFloat(f64),           // 浮点字面量约束
-    LiteralBool(bool),           // 布尔字面量约束
     LiteralString(String),       // 字符串字面量约束
-    Tuple(Arc<Vec<Constraint>>), // Tuple约束（元素列表）
+    Tuple(Arc<Vec<Constraint>>), // Tuple约束（元素列表）。Tuple不是笛卡尔积！相反，Tuple指的是笛卡尔积结果集合中的那些元素，即有序列表。
 
     // 注意，在我们的系统中，下述区间约束是连续Literal的并集的简化表示，比如Bound(0, 10) 表示 0 union 1 union ... union 10
     // 我们的系统本质上可以脱离这些区间约束而存在，但为了方便表达和优化，我们仍然保留了这些区间约束。
@@ -443,11 +442,13 @@ pub enum Constraint {
     FloatBound(FloatBound, FloatBound), // 浮点区间约束
     Int,                                // 整数超约束
     Float,                              // 浮点超约束
-    Bool,                               // 布尔超约束
     String,                             // 字符串超约束
+    // 还需要一个 Difference 约束，用于表示差集约束。
+    // 注意，我们的 Difference 约束仍然对应一个抽象的Union，只不过我们无法在内存中存储这个 Difference 约束的具体内容。Difference(A, B) 对应 A intersection not B。
+    Difference(Arc<Constraint>, Arc<Constraint>), // 差集约束，表示 A intersection not B
 
     // 我们的系统必须包含一个联合约束类型，用于表示多个并操作不可约约束的并集。
-    Union(Arc<Vec<Constraint>>), // 联合约束
+    Union(Arc<Vec<Constraint>>), //
 }
 
 /// 约束的核心操作实现。
@@ -464,7 +465,6 @@ impl Constraint {
 
             (Constraint::Int, Constraint::LiteralInt(_)) => true,
             (Constraint::Float, Constraint::LiteralFloat(_)) => true,
-            (Constraint::Bool, Constraint::LiteralBool(_)) => true,
             (Constraint::FloatBound(s1, e1), Constraint::FloatBound(s2, e2)) => {
                 FloatField::new(s1.clone(), e1.clone())
                     .contains_field(&FloatField::new(s2.clone(), e2.clone()))
@@ -477,10 +477,8 @@ impl Constraint {
             }
             (Constraint::LiteralInt(a), Constraint::LiteralInt(b)) => a == b,
             (Constraint::LiteralFloat(a), Constraint::LiteralFloat(b)) => a == b,
-            (Constraint::LiteralBool(a), Constraint::LiteralBool(b)) => a == b,
             (Constraint::Int, Constraint::Int) => true,
             (Constraint::Float, Constraint::Float) => true,
-            (Constraint::Bool, Constraint::Bool) => true,
             (Constraint::Int, Constraint::Bound(_, _)) => true,
             (Constraint::Float, Constraint::FloatBound(_, _)) => true,
             (Constraint::Float, Constraint::LiteralInt(_)) => true,
@@ -512,6 +510,41 @@ impl Constraint {
                     .all(|b_elem| a.iter().any(|a_elem| a_elem.super_of(b_elem)))
             }
             (a, Constraint::Union(b)) => b.iter().all(|c| a.super_of(c)),
+
+            // // 匹配 (A - B) ⊇ (C - D)
+            // // 它是可以被后面的匹配所覆盖的，但为了性能考虑，我们将其放在这里。
+            // (Constraint::Difference(a, b), Constraint::Difference(c, d)) => {
+            //     // 条件1: (A ∪ D) ⊇ C
+            //     let a_union_d = a.as_ref().union(d.as_ref());
+            //     if !a_union_d.super_of(c.as_ref()) {
+            //         return false;
+            //     }
+
+            //     // 条件2: D ⊇ (B ∩ C)
+            //     let b_intersect_c = b.as_ref().intersection(c.as_ref());
+            //     d.as_ref().super_of(&b_intersect_c)
+            // }
+
+            // 匹配 A ⊇ (B - C) => (A ∪ C) ⊇ B
+            (a, Constraint::Difference(b, c)) => {
+                // 计算 A ∪ C
+                let a_union_c = a.union(c.as_ref());
+                // 判断 (A ∪ C) ⊇ B
+                a_union_c.super_of(b.as_ref())
+            }
+
+            // 匹配 (A - B) ⊇ C => A ⊇ (B ∪ C) & (B ∩ C) = Bottom
+            (Constraint::Difference(a, b), c) => {
+                // 检查条件1: B 和 C 是否不相交
+                let b_intersect_c = b.as_ref().intersection(c);
+                if !matches!(b_intersect_c, Constraint::Bottom) {
+                    return false; // 如果相交，则不成立
+                }
+
+                // 检查条件2: A 是否是 C 的超集
+                a.as_ref().super_of(c)
+            }
+
             _ => false,
         }
     }
@@ -577,7 +610,73 @@ impl Constraint {
         if unique_elements.len() == 1 {
             return unique_elements.pop().unwrap();
         }
-        Constraint::Union(Arc::new(unique_elements))
+        Constraint::Union(Arc::new(
+            unique_elements.iter().map(|e| e.reduce()).collect(),
+        ))
+    }
+
+    fn direct_difference(&self, other: &Constraint) -> Option<Self> {
+        if let Constraint::Top = other {
+            return Some(Constraint::Bottom);
+        }
+        if let Constraint::Bottom = self {
+            return Some(Constraint::Bottom);
+        }
+        if other.super_of(self) {
+            return Some(Constraint::Bottom);
+        }
+        if let Constraint::Bottom = self.intersection(other) {
+            return Some(self.clone());
+        }
+        None
+    }
+
+    fn reduce_difference(&self, other: &Constraint) -> Option<Self> {
+        // 直接返回 A - B 的差集约束
+        // (A - B) - C => A - (B ∪ C)
+        // (A U B) - C => (A - C) U (B - C)
+        // A - (B - C) => A intersection not (B intersection not C) => A intersection (not B union C) => (A - B) U (A intersection C)
+        // A - (B U C) => 依次检查A可否被第N项直接归约，不能则跳过。能则归约成A'然后进行下一个元素的判定
+        match (self, other) {
+            (Constraint::Difference(a, b), c) => {
+                return a.reduce_difference(&b.union(c));
+            }
+            (Constraint::Union(elements), c) => {
+                let v = elements.iter().map(|e| e.difference(c)).collect::<Vec<_>>();
+                return Some(Self::reduce_union(&v));
+            }
+            (a, Constraint::Union(elements)) => {
+                let mut new_a = a.clone();
+                let mut new_union = elements.as_ref().clone();
+                new_union.retain(|e| {
+                    match new_a.reduce_difference(e) {
+                        Some(diff) => {
+                            new_a = diff;
+                            false // 直接差集后不再需要这个元素
+                        }
+                        None => true, // 保留这个元素
+                    }
+                });
+                Some(Constraint::Difference(
+                    Arc::new(new_a),
+                    Arc::new(Constraint::reduce_union(&new_union)),
+                ))
+            }
+            (a, Constraint::Difference(b, c)) => {
+                return Some(Self::reduce_union(&vec![
+                    a.difference(b),
+                    a.intersection(c),
+                ]));
+            }
+            (a, b) => return a.direct_difference(b),
+        }
+    }
+
+    pub fn difference(&self, other: &Self) -> Self {
+        match self.reduce_difference(other) {
+            Some(diff) => diff,
+            None => Constraint::Difference(Arc::new(self.clone()), Arc::new(other.clone())),
+        }
     }
 
     /// 展开联合约束为扁平Vec。
@@ -594,6 +693,7 @@ impl Constraint {
     pub fn reduce(&self) -> Self {
         match self {
             Constraint::Union(elements) => Constraint::reduce_union(elements),
+            Constraint::Difference(a, b) => a.difference(b),
             _ => self.clone(),
         }
     }
@@ -663,7 +763,6 @@ impl Constraint {
                 // 2. Same base type intersection
                 (Constraint::Int, Constraint::Int) => Some(Constraint::Int),
                 (Constraint::Float, Constraint::Float) => Some(Constraint::Float),
-                (Constraint::Bool, Constraint::Bool) => Some(Constraint::Bool),
                 (Constraint::String, Constraint::String) => Some(Constraint::String),
 
                 // 3. Type with Literal intersection
@@ -671,7 +770,6 @@ impl Constraint {
                 (Constraint::Float, Constraint::LiteralFloat(v)) => {
                     Some(Constraint::LiteralFloat(*v))
                 }
-                (Constraint::Bool, Constraint::LiteralBool(v)) => Some(Constraint::LiteralBool(*v)),
                 (Constraint::String, Constraint::LiteralString(s)) => {
                     Some(Constraint::LiteralString(s.clone()))
                 }
@@ -815,6 +913,10 @@ impl Constraint {
     /// 构造联合约束并自动归约。
     pub fn make_union(constraints: Vec<Self>) -> Self {
         Constraint::reduce_union(&constraints)
+    }
+
+    pub fn make_difference(a: Self, b: Self) -> Self {
+        a.difference(&b)
     }
 
     /// 构造Pair约束。
