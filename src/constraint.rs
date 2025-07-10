@@ -622,13 +622,21 @@ impl Constraint {
         if let Constraint::Bottom = self {
             return Some(Constraint::Bottom);
         }
-        if other.super_of(self) {
+
+        // 此处还应该有其他逻辑来处理抽象约束
+
+        // 对于原子值，我们认为当A > B时无简单表示，当B >= A时返回Bottom，当A与B没有任何superof关系时直接返回A
+
+        // B >= A
+        if other.super_of(self) { 
             return Some(Constraint::Bottom);
         }
-        if let Constraint::Bottom = self.intersection(other) {
-            return Some(self.clone());
+        // A > B
+        if self.super_of(other) {
+            return None;
         }
-        None
+        // A 与 B 没有任何 super_of 关系，直接返回 A
+        return Some(self.clone());
     }
 
     fn reduce_difference(&self, other: &Constraint) -> Option<Self> {
